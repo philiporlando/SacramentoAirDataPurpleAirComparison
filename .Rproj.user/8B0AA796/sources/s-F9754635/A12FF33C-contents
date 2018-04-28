@@ -1,0 +1,203 @@
+## Canopy Continuum, Diurnal Data Processing of Urban Air Quality in Six Cities
+## Created by Philip Orlando @ Sustainable Atmospheres Research Lab
+## 2017-11-29
+
+## import dependencies:
+if (!require(plyr)){
+  install.packages('plyr')
+  library(plyr)
+}
+
+
+if (!require(dplyr)){
+  install.packages('dplyr')
+  library(dplyr)
+}
+
+
+if (!require(stringr)){
+  install.packages('stringr')
+  library(stringr)
+}
+
+
+if (!require(openair)){
+  install.packages('openair')
+  library(openair)
+}
+
+if (!require(ggplot2)){
+  install.packages('ggplot2')
+  library(ggplot2)
+}
+
+if (!require(reshape2)){
+  install.packages('reshape2')
+  library(reshape2)
+}
+
+if (!require(tidyverse)){
+  install.packages('tidyverse')
+  library(tidyverse)
+}
+
+if (!require(rgdal)){
+  install.packages('rgdal')
+  library(rgdal)
+}
+
+if (!require(rgeos)){
+  install.packages('rgeos')
+  library(rgeos)
+}
+
+if (!require(classInt)){
+  install.packages('classInt')
+  library(classInt)
+}
+
+if (!require(RColorBrewer)){
+  install.packages('RColorBrewer')
+  library(RColorBrewer)
+}
+
+if (!require(leaflet)){
+  install.packages('leaflet')
+  library(leaflet)
+}
+
+if (!require(lubridate)){
+  install.packages('lubridate')
+  library(lubridate)
+}
+
+if (!require(stringi)){
+  install.packages('stringi')
+  library(stringi)
+}
+
+
+if (!require(tidyr)){
+  install.packages('tidyr')
+  library(tidyr)
+}
+
+
+## creating read functions for processing the raw data:
+
+## since each file has the same header, we only need to create one read function for this!
+read.airnow.hourly <- function(fpath) {
+  x <- read_csv(fpath, 
+                col_types = cols(`Date GMT` = col_date(format = "%Y-%m-%d"), 
+                                 `Date Local` = col_date(format = "%Y-%m-%d"), 
+                                 `Date of Last Change` = col_date(format = "%Y-%m-%d"), 
+                                 Latitude = col_double(), Longitude = col_double(), 
+                                 MDL = col_double(), `Method Code` = col_double(), 
+                                 POC = col_double(), `Parameter Code` = col_double(), 
+                                 `Sample Measurement` = col_number(), 
+                                 `Time GMT` = col_time(format = "%H:%M"), 
+                                 `Time Local` = col_time(format = "%H:%M")))
+  
+  x$month <- format(x$`Date Local`, "%m")
+  
+  ## create a season variable based on the extraced month:
+  x$season <- ifelse(x$month < "03" & x$month >= "01" | x$month == "12", "Winter",
+                     ifelse(x$month >= "03" & x$month < "06", "Spring",
+                            ifelse(x$month >= "06" & x$month < "09", "Summer",
+                                   ifelse(x$month >= "09" & x$month < "12", "Autumn",
+                                          "Other"))))
+  x$hour <- format(x$`Time Local`, "%H")
+  
+  return(x)
+  }
+
+## fpath <- "./EPA_AirNowData/CarbonMonoxide/hourly_42101_2017.csv"
+## test <- read.airnow.hourly(fpath)
+
+## create path variables for each pollutant directory:
+co.path.hourly <- "./EPA_AirNowData/CarbonMonoxide/"
+no2.path.hourly <- "./EPA_AirNowData/NitrogenDioxide/"
+pm25.path.hourly <- "./EPA_AirNowData/FineParticulateMatter/"
+pm10.path.hourly <- "./EPA_AirNowData/CoarseParticulateMatter/"
+o3.path.hourly <- "./EPA_AirNowData/Ozone/"
+
+## create of list files per each directory:
+co_files_hourly <- list.files(path = co.path.hourly, pattern = "\\.csv$",
+                       all.files=FALSE, full.names = TRUE,
+                       ignore.case = FALSE)
+
+no2_files_hourly <- list.files(path = no2.path.hourly, pattern = "\\.csv$",
+                        all.files=FALSE, full.names = TRUE,
+                        ignore.case = FALSE)
+
+pm25_files_hourly <- list.files(path = pm25.path.hourly, pattern = "\\.csv$",
+                         all.files=FALSE, full.names = TRUE,
+                         ignore.case = FALSE)
+
+pm10_files_hourly <- list.files(path = pm10.path.hourly, pattern = "\\.csv$",
+                         all.files=FALSE, full.names = TRUE,
+                         ignore.case = FALSE)
+
+o3_files_hourly <- list.files(path = o3.path.hourly, pattern = "\\.csv$",
+                              all.files=FALSE, full.names = TRUE,
+                              ignore.case = FALSE)
+
+
+## see what our memory limitations are:
+cat(paste("Percent memory allocated:", round(100*(memory.size()/memory.limit()), 2), "%"))
+
+## create master files for each pollutant:
+co_master_hourly <- ldply(co_files_hourly, read.airnow.hourly)
+gc()
+cat(paste("Percent memory allocated:", round(100*(memory.size()/memory.limit()), 2), "%"))
+
+no2_master_hourly <- ldply(no2_files_hourly, read.airnow.hourly)
+gc()
+cat(paste("Percent memory allocated:", round(100*(memory.size()/memory.limit()), 2), "%"))
+
+pm25_master_hourly <- ldply(pm25_files_hourly, read.airnow.hourly)
+gc()
+cat(paste("Percent memory allocated:", round(100*(memory.size()/memory.limit()), 2), "%"))
+
+pm10_master_hourly <- ldply(pm10_files_hourly, read.airnow.hourly)
+gc()
+cat(paste("Percent memory allocated:", round(100*(memory.size()/memory.limit()), 2), "%"))
+
+o3_master_hourly <- ldply(o3_files_hourly, read.airnow.hourly)
+gc()
+cat(paste("Percent memory allocated:", round(100*(memory.size()/memory.limit()), 2), "%"))
+
+
+pdx <- subset(pm25_master_hourly, `County Name` == "Multnomah" | `State Name` == "Oregon")
+unique(pdx$`County Name`)
+ada <- subset(pm25_master_hourly, `County Name` == "Ada" | `State Name` == "Idaho")
+unique(ada$`County Name`)
+
+
+## bind rows to form one master file:
+master_hourly <- bind_rows(co_master_hourly, no2_master_hourly, pm25_master_hourly, pm10_master_hourly, o3_master_hourly)
+
+## Visually inspect data for each county of interest:
+head(subset(master_hourly, `County Name` == "Multnomah"))
+head(subset(master_hourly, `County Name` == "Pierce"))
+head(subset(master_hourly, `County Name` == "Ada"))
+head(subset(master_hourly, `County Name` == "Sacramento"))
+head(subset(master_hourly, `County Name` == "Salt Lake"))
+head(subset(master_hourly, `County Name` == "Bernalillo"))
+
+## create a subset of just these six cites:
+six_city_hourly <- subset(master_hourly,
+                     `County Name` == "Ada" |
+                     `County Name` == "Bernalillo" |
+                     `County Name` == "Multnomah" |
+                     `County Name` == "Pierce" |
+                     `County Name` == "Sacramento" |
+                     `County Name` == "Salt Lake" )
+
+## ensure that each county has made the list:
+unique(six_city_hourly$`County Name`)
+str(six_city_hourly)
+
+## write this dataframe to a csv file:
+write.csv(six_city_hourly, paste0("./SixCityData/", format(format(Sys.time(), "%Y-%m-%d")),"_six_city_hourly.csv"), row.names = FALSE)
+

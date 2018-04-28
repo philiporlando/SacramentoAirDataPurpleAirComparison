@@ -1,0 +1,413 @@
+## Source the necessary packages:
+if (!require(plyr)){
+  install.packages('plyr')
+  library(plyr)
+}
+
+
+if (!require(dplyr)){
+  install.packages('dplyr')
+  library(dplyr)
+}
+
+
+if (!require(stringr)){
+  install.packages('stringr')
+  library(stringr)
+}
+
+#reads in one TSI P-trak 8525 file:
+read.ptrak<-function(fpath){
+  x<-read.csv(fpath,skip=30,header=FALSE,stringsAsFactors=FALSE)
+  colnames(x)<-c("date","time","pnc")
+  ##merge date and time column together
+  x$datetime<-strptime(paste(x$date,x$time),"%m/%d/%Y %H:%M:%S",tz="UTC")
+  ## convert the first column to a posix timestamp
+  x$datetime<-as.POSIXct(x$datetime,format= "%m/%d/%Y %H:%M:%S",tz="UTC")
+  x<-x[,-c(1:2)]
+  x<-x[,c(2,1)]
+  x %>%
+    group_by(datetime = cut(datetime, breaks = "1 min")) %>%
+    dplyr::summarize(pnc = mean(pnc))
+}
+
+## reads in one TSI DustTrak DRX 8533 file:
+read.dtrak<-function(fpath){
+  sdate<-read.csv(fpath, header=FALSE, nrow=1, skip=7)
+  stime <-read.csv(fpath, header = FALSE, nrow=1, skip=6)  
+  startDate<-strptime(paste(sdate$V2, stime$V2), "%m/%d/%Y %H:%M:%S", tz="UTC")
+  x<-read.csv(fpath, skip=37, stringsAsFactors = FALSE, header = FALSE)
+  names(x)<-c("elapsedtime","pm1","pm2.5","pm4","pm10","total","alarms","errors")
+  x$datetime<-x$elapsedtime+startDate
+  x$datetime <- as.POSIXct(x$datetime, format = "%m/%d/%Y %H:%M:%S", tz = "UTC")
+  x<-x[,-c(1,7,8)]
+  x<-x[,c(6,1,2,3,4,5)]
+  x$pm1 <- x$pm1 * 1000
+  x$pm2.5 <- x$pm2.5 * 1000
+  x$pm4 <- x$pm4 * 1000
+  x$pm10 <- x$pm10 * 1000
+  x$total <- x$total * 1000
+  x %>% 
+    group_by(datetime = cut(datetime, breaks = "1 min")) %>%
+    dplyr::summarize(pm1 = mean(pm1), pm2.5 = mean(pm2.5), pm4 = mean(pm4), 
+              pm10 = mean(pm10), total = mean(total))
+}
+
+
+## reads in one api file from AirAdvice 5200 Monitor:
+read.aa5200.api <- function(fpath){
+  x<-read.csv(fpath, header = TRUE, stringsAsFactors = FALSE)
+  names(x)<-c("datetime", "co", "co2", "VOC", "RH","ugm3","temp")
+  x$datetime <- strptime(x$datetime, format = "%Y-%m-%d %H:%M")
+  x$datetime <- as.POSIXct(x$datetime, format = "%Y-%m-%d %H:%M:%S")
+  return(x)
+}
+
+
+
+
+## Better version of the read.aa5200 function that appends an id variable:
+read.airadvice <- function(fpath){
+  x<-read.csv(fpath, header = TRUE, stringsAsFactors = FALSE)
+  names(x)<-c("date", "co", "co2", "VOC", "RH","ugm3","temp")
+  x$date <- strptime(x$date, format = "%Y-%m-%d %H:%M")
+  x$date <- as.POSIXct(x$date, format = "%Y-%m-%d %H:%M:S")
+  
+  ## Assign ID vector based on serial number in the filename:
+  x <- x%>% 
+    group_by(date = cut(date, breaks = "1 hour")) %>%
+    dplyr::summarize(co = mean(co), co2 = mean(co2), 
+              VOC = mean(VOC), RH = mean(RH),
+              ugm3 = mean(ugm3), temp = mean(temp))
+  x$sensor <- str_extract(fpath, "[0-9]{5,}")
+  
+  ## Using nested ifelse statements for assigning volunteer id's to each sensor id:
+  x$id <- ifelse(x$sensor == 32021, "Tobias",
+                 ifelse(x$sensor == 32020, "Penniger",
+                 ifelse(x$sensor == 32019, "Borth", 
+                 ifelse(x$sensor == 32063, "Leitner",
+                 ifelse(x$sensor == 32052, "Frumkin",
+                 ifelse(x$sensor == 32023, "Pohl",
+                 ifelse(x$sensor == 32066, "Schutzer",
+                 ifelse(x$sensor == 32033, "Swan",
+                 ifelse(x$sensor == 32058, "Rajacic",
+                 ifelse(x$sensor == 32734, "Allen", NA))))))))))
+  
+  x$site <- ifelse(x$id == "Borth", "A",
+                   ifelse(x$id == "Penniger", "B",
+                   ifelse(x$id == "Tobias", "C",
+                   ifelse(x$id == "Pohl", "D",
+                   ifelse(x$id == "Swan", "E",
+                   ifelse(x$id == "Frumkin","F",
+                   ifelse(x$id == "Rajacic", "G",
+                   ifelse(x$id == "Leitner", "H",
+                   ifelse(x$id == "Schutzer", "I",
+                   ifelse(x$id == "Allen", "J", NA))))))))))
+  
+  x$date <- as.POSIXct(x$date, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+  return(x)
+}
+
+
+## Reads in one AcuRite file:
+read.acurite <- function(fpath){
+  x <- read.csv(fpath, skip=2, stringsAsFactors = FALSE, header = FALSE)
+  names(x) <- c("date","temp", "rh","dew_point","heat_index","wind_chill","pressure", "rain","ws","wind_average","wind_peak","wd","indoor_temp","indoor_rh")
+  x <- x[,-c(13:14)] ## removing the indoor temp and rh columns
+  x$date <- as.POSIXct(x$date, format = "%m/%d/%Y %r", tz = "UTC")
+  x <- x %>% 
+    group_by(date = cut(date, breaks = "1 hour")) %>%
+    dplyr::summarize(temp = mean(temp), rh = mean(rh), dew_point = mean(dew_point),
+              heat_index=mean(heat_index), wind_chill = mean(wind_chill),
+              pressure =  mean(pressure), rain=mean(rain), ws = mean(ws),
+              wind_average=mean(wind_average), wind_peak = mean(wind_peak), wd = mean(wd))
+  x$date <- as.POSIXct(x$date, tz="UTC")
+  return(x)
+}
+
+## reads in one Apis file, and creates an 'id' vector for each site location:
+
+read.apis <- function(fpath){
+  id <- read.csv(fpath, header=FALSE, nrow=1, skip=0)
+  id <- id[1,1]
+  x <- read.csv(fpath, skip=2, stringsAsFactors = FALSE, header = FALSE)
+  names(x) <- c("date","co", "no","no2","o3")
+  x$date <- as.POSIXct(x$date, format = "%m/%d/%Y %H:%M", tz = "UTC")
+  x$co <- as.numeric(x$co)
+  x$no <- as.numeric(x$no)
+  x$no2 <- as.numeric(x$no2)
+  x$o3 <- as.numeric(x$o3)
+  x <- x %>%
+    group_by(date = cut(date, breaks = "1 hour")) %>%
+    dplyr::summarize(co = mean(co), no = mean(no), no2 = mean(no2), o3 = mean(o3))
+  x$id <- id ## append the id after aggregation to avoid non-numeric operator error!
+  x$site <- ifelse(x$id == "Borth", "A",
+            ifelse(x$id == "Penniger", "B",
+            ifelse(x$id == "Tobias", "C",
+            ifelse(x$id == "Pohl", "D",
+            ifelse(x$id == "Swan", "E",
+            ifelse(x$id == "Frumkin","F",
+            ifelse(x$id == "Rajacic", "G",
+            ifelse(x$id == "Leitner", "H",
+            ifelse(x$id == "Schutzer", "I",
+            ifelse(x$id == "Allen", "J",
+            ifelse(x$id == "Rodriguez", "K", NA)))))))))))
+  
+  x$date <- as.POSIXct(x$date, tz = "UTC")
+  return(x)
+}
+
+
+
+##test code:
+#fpath <- "E:/EAGER/Calibrations/api_32734/Raw/2017-04-14_32734-aqdata.csv"
+#dta <- read.aa5200.api(fpath)
+#head(dta)
+
+## reads one AirAdvice api file from 5200 Monitor:
+read.aa5200 <- function(fpath){
+  x<-read.csv(fpath, header = TRUE, stringsAsFactors = FALSE)
+  names(x)<-c("ID", "datetime", "pt_ugm3", "temp", "rh", "co","co2",
+              "tvoc1","tvoc2","voc1_ugm3","voc2_ugm3","press","form","Li",
+              "pc0","pc1","pc2","pm25")
+  #remove variables with all NAs
+  x <- x[,-c(8,10,13:14,18)] #remove variables with a ton of NAs
+  x <- x[,c(2:13,1)] # organize the order of each variable so that datetime is first and ID is last
+  x$pc0[is.na(x$pc0)] <- 0 #replacing missing values with zero
+  x$pc1[is.na(x$pc1)] <- 0 #replacing missing values with zero
+  x$pc2[is.na(x$pc2)] <- 0 #replacing missing values with zero
+  x$datetime <- strptime(x$datetime, format = "%m/%d/%Y %H:%M")
+  x$datetime <- as.POSIXct(x$datetime, format = "%m/%d/%Y %H:%M:S")
+  return(x)
+}
+
+
+#aa_34 <- "E:/EAGER/Calibrations/aa_32734/Raw/SN_32734_3-30-17.csv"
+#dta <- read.aa5200(aa_34)
+#head(dta)
+
+## A function for aggregating raw nephelometer serial data collected from the "neph_logger.py" script:
+read.neph <- function(fpath){
+  x <- read.csv(fpath, skip = 1, header = FALSE, sep = "", stringsAsFactors = FALSE, encoding="UTF-8", quote="\"", comment.char="#")
+  names(x) <- c("date","time","bscat","scat_coef","pressure_mbar","temp_K","CH1","CH2")
+  x$datetime <- as.POSIXct(paste(x$date, x$time), format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+  x<-x[,-c(1:2,7:8)] ## removing the date and time columns and the empty channels
+  x<-x[,c(5,1:4)] ## moving the datetime column to the front
+  x$ugm3 <- ((18.8 * (x$bscat/0.0001)) - 3.4) ## convert bscat to ug/m3 using ODEQ's linear regression. 
+    group_by(datetime = cut(datetime, breaks = "1 min")) %>%
+    dplyr::summarize(bscat = mean(bscat), scat_coef = mean(scat_coef), 
+              pressure_mbar = mean(pressu.2re_mbar), temp_K = mean(temp_K),
+              ugm3 = mean(ugm3))
+}
+
+##fpath <- "E:/EAGER/Calibrations/neph_338/Raw/2017-04-14_nephelometer_338.txt"
+##dta <- read.neph(fpath)
+##head(dta)
+#test <- read.neph(neph_path)
+#head(test)
+
+read.co_48c <- function(fpath) { 
+  x <- read.csv(fpath, skip = 1, header = FALSE, stringsAsFactors = FALSE, encoding  = "UTF-8", quote="\"", comment.char="#")
+  names(x) <- c("datetime","co","volts")
+  x <- as.data.frame(x)
+  x$datetime <- as.POSIXct(x$datetime, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+  x %>%
+    group_by(datetime = cut(datetime, breaks = "1 min")) %>%
+    dplyr::summarize(co = mean(co), volts = mean(volts))
+}
+
+
+#fpath <- "E:/EAGER/Calibrations/CO_Analyzer/Raw/2017-05-12_CO_analyzer.txt"
+#read.co_48c(fpath)
+
+read.co2_li480 <- function(fpath) {
+  sdate <- read.csv(fpath, header=FALSE, nrow=1, skip=0)
+  sdate <-str_sub(sdate$V1, 1,10)
+  x <- read.csv(fpath, skip = 1, header = TRUE, sep = "", stringsAsFactors = FALSE, encoding = "UTF-8", quote="\"", comment.char = "#")
+  names(x) <- c("time","co2_ppm","h2o_ppt","h2o_C","cell_temp_C","cell_pressure_kPa","co2_abs","h2o_abs")
+  x$datetime <- paste(sdate, " ", x$time) 
+  x$datetime <- as.POSIXct(x$datetime, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+  ## This only works for data from the same day!!!
+  ## It will paste the original start date over every time...
+  ## There is probably a 'smart' way to do it... 
+  ## Wrong POSIX format, but we'll see if it works... 
+  x <- x[,-1]
+  x <- x[, c(8, 1:7)]
+  x %>%
+    group_by(datetime = cut(datetime, breaks = "1 min")) %>%
+    dplyr::summarize(co2_ppm = mean(co2_ppm), h2o_ppt = mean(h2o_ppt), h2o_C = mean(h2o_C), 
+              cell_pressure_kPa = mean(cell_pressure_kPa), co2_abs = mean(co2_abs),
+              h2o_abs = mean(h2o_abs))
+}
+
+#fpath <- "C:/Users/porlando/Desktop/CO2_Analyzer_Data/notinuse/2017-05-05-1527-CO2-analyzer.txt"
+
+#co2 <- read.CO2_li480(fpath)
+
+
+## reads in one HOBOware file
+read.HOBO2 <- function(fpath) {
+  x <- read.csv(fpath, skip = 2, header = FALSE, sep = ",", stringsAsFactors = FALSE, encoding = "UTF-8", quote="\"", comment.char = "#")
+  names(x) <- c("index","datetime","temperature","rh","lux","volts")
+  x$datetime <- as.POSIXct(x$datetime, format = "%m/%d/%y %I:%M:%S %p", tz = "UTC") ##convert from 12-hour time to 24-hour time format
+  x <- x[,-1]
+  x <- x[, c(1:5)]
+  x$bscat <- x$volts * 0.8 ## Using Derek's 1V = 8*10^-5m^-1 bscat equation
+  x$bscat_manual <- (x$volts/2.5)*(2*10^-4) ## using the analog conversion provided by the manual
+  x$pm_ugm3 <- (0.2083*x$bscat)-1.4167 ## Using Meenakshi's linear regression
+  x$DEQ_pm_ugm3 <- ((18.8 * (x$bscat_manual/0.0001)) - 3.4) ## Using DEQ's linear regression
+  x %>%
+    group_by(datetime = cut(datetime, breaks = "1 min")) %>%
+    dplyr::summarize(temperature = mean(temperature), rh = mean(rh), lux = mean(lux), 
+              volts = mean(volts), bscat = mean(bscat),
+              bscat_manual = mean(bscat_manual),
+              pm_ugm3 = mean(pm_ugm3), DEQ_pm_ugm3 = mean(DEQ_pm_ugm3))
+}
+
+#fpath <- "E:/HOBOware/2017-06-13-Lindas_patio_339.csv"
+##HOBO_test <- read.HOBO(fpath)
+
+
+
+## reads in one Apis file, and creates an 'id' vector for each site location:
+read.apis <- function(fpath){
+  id <- read.csv(fpath, header=FALSE, nrow=1, skip=0)
+  id <- id[1,1]
+  x <- read.csv(fpath, skip=2, stringsAsFactors = FALSE, header = FALSE)
+  names(x) <- c("date","co", "no","no2","o3")
+  x$date <- as.POSIXct(x$date, format = "%m/%d/%Y %H:%M", tz = "UTC")
+  x$co <- as.numeric(x$co)
+  x$no <- as.numeric(x$no)
+  x$no2 <- as.numeric(x$no2)
+  x$o3 <- as.numeric(x$o3)
+  
+  ## for checking each conditional statement, uncomment the following line:
+  #x <- x[-1,]
+  
+  ## if our first timestamp ends in a "0", then aggregate normally
+  if (substr(x$date[[1]], 16, 16) == "0") {
+    y <- x %>%
+      group_by(date = cut(date, breaks = "10 min")) %>%
+      dplyr::summarize(co = mean(co), no = mean(no), no2 = mean(no2), o3 = mean(o3))
+    y$id <- id ## append the id after aggregation to avoid non-numeric operator error!
+    return(y)
+  } 
+  
+  ## if our first timestamp ends in a "5", then add 300 seconds before aggregating
+  else if (substr(x$date[[1]], 16, 16) == "5") {
+    y <- x %>% 
+      group_by(date = cut(date + 300, breaks = "10 min")) %>%
+      dplyr::summarize(co = mean(co), no = mean(no), no2 = mean(no2), o3 = mean(o3))
+    y$id <- id ## append the id after aggregation to avoid non-numeric operator error!
+    return(y)
+  }
+}
+
+
+reformat.aa5200 <- function(fpath){
+  x<-read.csv(fpath, header = TRUE, stringsAsFactors = FALSE)
+  names(x)<-c("sensor", "date", "ugm3", "temp", "RH", "co","co2",
+              "tvoc1","tvoc2","voc1_ugm3","VOC","press","form","Li",
+              "pc0","pc1","pc2","pm25")
+  #remove variables with all NAs
+  x <- x[,-c(8:10,12:18)] #remove variables with a ton of NAs
+  x <- x[,c(2,6,7,8,5,3,4,1)] # organize the order of each variable so that datetime is first and ID is last
+  
+  x$id <- ifelse(x$sensor == 32021, "Tobias",
+                 ifelse(x$sensor == 32020, "Penniger",
+                        ifelse(x$sensor == 32019, "Borth", 
+                               ifelse(x$sensor == 32063, "Leitner",
+                                      ifelse(x$sensor == 32052, "Frumkin",
+                                             ifelse(x$sensor == 32023, "Pohl",
+                                                    ifelse(x$sensor == 32066, "Schutzer",
+                                                           ifelse(x$sensor == 32033, "Swan",
+                                                                  ifelse(x$sensor == 32058, "Rajacic",
+                                                                         ifelse(x$sensor == 32060, "Allen", NA))))))))))
+  x$site <- ifelse(x$id == "Borth", "A",
+                   ifelse(x$id == "Penniger", "B",
+                          ifelse(x$id == "Tobias", "C",
+                                 ifelse(x$id == "Pohl", "D",
+                                        ifelse(x$id == "Swan", "E",
+                                               ifelse(x$id == "Frumkin","F",
+                                                      ifelse(x$id == "Rajacic", "G",
+                                                             ifelse(x$id == "Leitner", "H",
+                                                                    ifelse(x$id == "Schutzer", "I",
+                                                                           ifelse(x$id == "Allen", "J", NA))))))))))
+  
+  x$date <- strptime(x$date, format = "%m/%d/%Y %H:%M")
+  x$date <- as.POSIXct(x$date)
+  return(x)
+}
+
+
+
+
+
+## reads in multiple files at once using any specified function:
+read.files<-function(fpaths, FUN, ...){
+  tbls<-lapply(fpaths, FUN, ...)
+  dta<-do.call(rbind,tbls)
+  return(dta)
+}
+
+
+## Identify, describe, plot, and remove the outliers from the dataset
+## By Klodian Dhana, Published: April 30, 2016
+outlierKD <- function(dt, var) {
+  var_name <- eval(substitute(var),eval(dt))
+  na1 <- sum(is.na(var_name))
+  m1 <- mean(var_name, na.rm = T)
+  par(mfrow=c(2, 2), oma=c(0,0,3,0))
+  boxplot(var_name, main="With outliers")
+  hist(var_name, main="With outliers", xlab=NA, ylab=NA)
+  outlier <- boxplot.stats(var_name)$out
+  mo <- mean(outlier)
+  var_name <- ifelse(var_name %in% outlier, NA, var_name)
+  boxplot(var_name, main="Without outliers")
+  hist(var_name, main="Without outliers", xlab=NA, ylab=NA)
+  title("Outlier Check", outer=TRUE)
+  na2 <- sum(is.na(var_name))
+  cat("Outliers identified:", na2 - na1, "n")
+  cat("Propotion (%) of outliers:", round((na2 - na1) / sum(!is.na(var_name))*100, 1), "n")
+  cat("Mean of the outliers:", round(mo, 2), "n")
+  m2 <- mean(var_name, na.rm = T)
+  cat("Mean without removing outliers:", round(m1, 2), "n")
+  cat("Mean if we remove outliers:", round(m2, 2), "n")
+  response <- readline(prompt="Do you want to remove outliers and to replace with NA? [yes/no]: ")
+  if(response == "y" | response == "yes"){
+    dt[as.character(substitute(var))] <- invisible(var_name)
+    assign(as.character(as.list(match.call())$dt), dt, envir = .GlobalEnv)
+    cat("Outliers successfully removed", "n")
+    return(invisible(dt))
+  } else{
+    cat("Nothing changed", "n")
+    return(invisible(var_name))
+  }
+}
+
+## Modified script to automatically remove outliers:
+outlierKO <- function(dt, var) {
+  var_name <- eval(substitute(var),eval(dt))
+  na1 <- sum(is.na(var_name))
+  m1 <- mean(var_name, na.rm = T)
+  par(mfrow=c(2, 2), oma=c(0,0,3,0))
+  boxplot(var_name, main="With outliers")
+  hist(var_name, main="With outliers", xlab=NA, ylab=NA)
+  outlier <- boxplot.stats(var_name)$out
+  mo <- mean(outlier)
+  var_name <- ifelse(var_name %in% outlier, NA, var_name)
+  boxplot(var_name, main="Without outliers")
+  hist(var_name, main="Without outliers", xlab=NA, ylab=NA)
+  title("Outlier Check", outer=TRUE)
+  na2 <- sum(is.na(var_name))
+  cat("Outliers identified:", na2 - na1, "n")
+  cat("Propotion (%) of outliers:", round((na2 - na1) / sum(!is.na(var_name))*100, 1), "n")
+  cat("Mean of the outliers:", round(mo, 2), "n")
+  m2 <- mean(var_name, na.rm = T)
+  cat("Mean without removing outliers:", round(m1, 2), "n")
+  cat("Mean if we remove outliers:", round(m2, 2), "n")
+  dt[as.character(substitute(var))] <- invisible(var_name)
+  assign(as.character(as.list(match.call())$dt), dt, envir = .GlobalEnv)
+  cat("Outliers successfully removed", "n")
+  return(invisible(dt))
+}

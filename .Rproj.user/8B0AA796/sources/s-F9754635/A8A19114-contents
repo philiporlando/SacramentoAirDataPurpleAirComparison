@@ -1,0 +1,315 @@
+# created by Philip Orlando
+# Sustainable Atmospheres Research Lab
+# 2018-04-18
+# exploring EPA AirData from Albuquerque's regional monitoring sites
+# creating pollution roses from hourly pm2.5 (FEM and non-FEM sites) and wind data
+
+
+# load the necessary packages
+if (!require(pacman)) {
+  install.packages("pacman")
+  library(pacman)
+}
+
+p_load(readr
+       ,ggplot2
+       ,openair
+       ,plyr
+       ,dplyr
+       ,rgdal
+       ,rgeos
+       ,stringr
+       ,tidyr
+       ,RColorBrewer
+       ,sf
+       ,leaflet
+       ,htmltools
+       ,mapview
+       ,htmlwidgets
+)
+
+
+
+
+# custom windRose function courtesy of: https://rpubs.com/mariner610/windrose
+plot.windrose <- function(data,
+                          spd,
+                          dir,
+                          spdres = 2,
+                          dirres = 30,
+                          spdmin = 2,
+                          spdmax = 20,
+                          spdseq = NULL,
+                          palette = "YlGnBu",
+                          countmax = NA,
+                          debug = 0){
+  
+  
+  # Look to see what data was passed in to the function
+  if (is.numeric(spd) & is.numeric(dir)){
+    # assume that we've been given vectors of the speed and direction vectors
+    data <- data.frame(spd = spd,
+                       dir = dir)
+    spd = "spd"
+    dir = "dir"
+  } else if (exists("data")){
+    # Assume that we've been given a data frame, and the name of the speed 
+    # and direction columns. This is the format we want for later use.    
+  }  
+  
+  # Tidy up input data ----
+  n.in <- NROW(data)
+  dnu <- (is.na(data[[spd]]) | is.na(data[[dir]]))
+  data[[spd]][dnu] <- NA
+  data[[dir]][dnu] <- NA
+  
+  # figure out the wind speed bins ----
+  if (missing(spdseq)){
+    spdseq <- seq(spdmin,spdmax,spdres)
+  } else {
+    if (debug >0){
+      cat("Using custom speed bins \n")
+    }
+  }
+  # get some information about the number of bins, etc.
+  n.spd.seq <- length(spdseq)
+  n.colors.in.range <- n.spd.seq - 1
+  
+  # create the color map
+  spd.colors <- colorRampPalette(brewer.pal(min(max(3,
+                                                    n.colors.in.range),
+                                                min(9,
+                                                    n.colors.in.range)),                                               
+                                            palette))(n.colors.in.range)
+  
+  if (max(data[[spd]],na.rm = TRUE) > spdmax){    
+    spd.breaks <- c(spdseq,
+                    max(data[[spd]],na.rm = TRUE))
+    spd.labels <- c(paste(c(spdseq[1:n.spd.seq-1]),
+                          '-',
+                          c(spdseq[2:n.spd.seq])),
+                    paste(spdmax,
+                          "-",
+                          max(data[[spd]],na.rm = TRUE)))
+    spd.colors <- c(spd.colors, "grey50")
+  } else{
+    spd.breaks <- spdseq
+    spd.labels <- paste(c(spdseq[1:n.spd.seq-1]),
+                        '-',
+                        c(spdseq[2:n.spd.seq]))    
+  }
+  data$spd.binned <- cut(x = data[[spd]],
+                         breaks = spd.breaks,
+                         labels = spd.labels,
+                         ordered_result = TRUE)
+  # clean up the data
+  data. <- na.omit(data)
+  
+  # figure out the wind direction bins
+  dir.breaks <- c(-dirres/2,
+                  seq(dirres/2, 360-dirres/2, by = dirres),
+                  360+dirres/2)  
+  dir.labels <- c(paste(360-dirres/2,"-",dirres/2),
+                  paste(seq(dirres/2, 360-3*dirres/2, by = dirres),
+                        "-",
+                        seq(3*dirres/2, 360-dirres/2, by = dirres)),
+                  paste(360-dirres/2,"-",dirres/2))
+  # assign each wind direction to a bin
+  dir.binned <- cut(data[[dir]],
+                    breaks = dir.breaks,
+                    ordered_result = TRUE)
+  levels(dir.binned) <- dir.labels
+  data$dir.binned <- dir.binned
+  
+  # Run debug if required ----
+  if (debug>0){    
+    cat(dir.breaks,"\n")
+    cat(dir.labels,"\n")
+    cat(levels(dir.binned),"\n")       
+  }  
+  
+  # deal with change in ordering introduced somewhere around version 2.2
+  if(packageVersion("ggplot2") > "2.2"){    
+    cat("Hadley broke my code\n")
+    data$spd.binned = with(data, factor(spd.binned, levels = rev(levels(spd.binned))))
+    spd.colors = rev(spd.colors)
+  }
+  
+  # create the plot ----
+  p.windrose <- ggplot(data = data,
+                       aes(x = dir.binned,
+                           fill = spd.binned)) +
+    geom_bar() + 
+    scale_x_discrete(drop = FALSE,
+                     labels = waiver()) +
+    coord_polar(start = -((dirres/2)/360) * 2*pi) +
+    scale_fill_manual(expression(~PM[2.5]~mu*g*m^-3),
+      #name = "Wind Speed (m/s)", 
+                      values = spd.colors,
+                      drop = FALSE) +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          #panel.border = element_rect(colour = "blank"),
+          panel.grid.major = element_line(colour="grey65"))
+  
+  # adjust axes if required
+  if (!is.na(countmax)){
+    p.windrose <- p.windrose +
+      ylim(c(0,countmax))
+  }
+  
+  # print the plot
+  print(p.windrose)  
+  
+  # return the handle to the wind rose
+  return(p.windrose)
+}
+
+
+# geography projection
+wgs_84 <- "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs "
+
+
+# reading in shapefiles for the entire US
+urban_areas <- readOGR(dsn = "./data/tigerline/tl_2017_us_uac10.shp")
+
+# pulling out only Albuquerque, NM shapefiles
+albuq <- subset(urban_areas # not metropolitan statistical areas...
+                ,str_detect(NAME10
+                            ,"Albuquerque, NM"
+                            )
+                )
+
+# assign file paths to objects
+pm_path <- "./data/airdata/pm2_5/"
+wind_path <- "./data/airdata/wind/"
+
+# create list of files for each path
+pm_files <- list.files(path = pm_path
+                       ,pattern = "\\.zip$"
+                       ,all.files = FALSE
+                       ,full.names = TRUE
+                       ,ignore.case = FALSE
+                       )
+
+
+wind_files <- list.files(path = wind_path
+                       ,pattern = "\\.zip$"
+                       ,all.files = FALSE
+                       ,full.names = TRUE
+                       ,ignore.case = FALSE
+)
+
+# apply read function to a list of files
+pm2_5 <- ldply(pm_files, read_csv)
+gc()
+wind <- ldply(wind_files, read_csv)
+gc()
+
+# filter our data based on the sites in albuquerque
+pm2_5 <- subset(pm2_5, `State Name` == "New Mexico")
+wind <- subset(wind, `State Name` == "New Mexico")
+
+# this isn't spreading exactly as desired
+# it introduced an equivalent number of NAs for wd and ws vectors
+# wind <- spread(wind
+#                ,key = `Parameter Name`
+#                ,value = `Sample Measurement`
+#                )
+
+
+# extract longitude and latitude (x,y) from our airdata
+pm_coords <- pm2_5[,c(7,6)]
+wind_coords <- wind[, c(7,6)]
+
+# create sp object using these coordinates and the projection of the albuq shapefile
+pm_points <- SpatialPointsDataFrame(coords = pm_coords
+                                    ,data = pm2_5
+                                    ,proj4string = CRS(proj4string(albuq))
+                                    )
+
+wind_points <- SpatialPointsDataFrame(coords = wind_coords
+                                    ,data = wind
+                                    ,proj4string = CRS(proj4string(albuq))
+                                    )
+
+# subset the airdata points that are contained by the albuq urban area boundary
+pm_albuq <- pm_points[albuq,]
+wind_albuq <- wind_points[albuq,]
+
+
+
+# join the wind and pm data into a single dataframe
+df <- inner_join(pm_albuq@data, wind_albuq@data, by = c("Date Local", "Time Local", "Date GMT", "Time GMT"))
+df <- subset(df, `Parameter Name.y` == "Wind Direction - Resultant")
+
+# rename columns to work nicely with openair
+colnames(df)[colnames(df) == "Sample Measurement.x"] <- "pm2_5"
+colnames(df)[colnames(df) == "Sample Measurement.y"] <- "wd"
+colnames(df)[colnames(df) == "Date Local"] <- "date"
+
+df <- subset(df, !is.na(pm2_5))
+df <- subset(df, `Site Num.x` != "0024")
+
+
+
+p1 <- plot.windrose(data = df
+                    ,spd = "pm2_5"
+                    ,dir = "wd"
+                    ) + 
+  facet_grid(~`Site Num.x`) + 
+  labs(title = "Albuquerque Pollution Rose"
+       ,subtitle = "PM2.5 EPA AirData (2015-2017)") +
+  theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"),
+        axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+        axis.title = element_text(size=15, face = "bold"),
+        strip.text.x = element_text(size=12, face = "bold"),
+        legend.position = "right",
+        legend.text = element_text(color = "black", size = 10),
+        legend.title = element_text(color = "black", size = 12, face = "bold")
+        )
+
+p1
+
+
+pm_albuq <- st_as_sf(pm_albuq)
+pm_sites <- pm_albuq[, ] %>% distinct(geometry, .keep_all = TRUE)
+pm_sites <- st_transform(pm_sites, crs = st_crs(wgs_84))
+pm_sites <- subset(pm_sites, `Site Num` != "0024")
+
+
+# population density and cell id label (total)
+site_label <- sprintf(
+  "<strong>Site Number: %s</strong>"
+  ,pm_sites$`Site Num`
+  ) %>% 
+  lapply(HTML)
+
+
+site_pop <- paste(sep = "<br/>"
+                  ,"<b><a href='http://www.web.pdx.edu/~porlando/CanopyContinuum/PollutionRose/albuq.png'>Pollution Rose<a/></b>"
+                  #,"\n"
+                  #,"<img src = http://www.web.pdx.edu/~porlando/CanopyContinuum/PollutionRose/albuq.png>"
+                  ,"<b>Site Number:</b> "
+                  ,pm_sites$`Site Num`)
+
+leaflet() %>% 
+  addTiles() %>%
+  addCircleMarkers(data = pm_sites
+                   ,popup = site_pop
+                   # ,popup = popupImage('http://www.web.pdx.edu/~porlando/CanopyContinuum/PollutionRose/albuq.png'
+                   # ,height = 400
+                   # ,width = 600
+                   # ,src = "remote"
+                   # )
+                   # ,label = site_label
+                   # ,labelOptions = labelOptions(
+                   #   style = list("font-weight" = "normal"
+                   #                , padding = "3px 8px"
+                   #   )
+                   #   ,textsize = "15px"
+                   #   ,direction = "auto"
+                   # )
+  )
+

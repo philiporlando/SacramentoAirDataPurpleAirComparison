@@ -1,0 +1,973 @@
+## install dependencies:
+library(plyr)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(RColorBrewer)
+library(scales)
+library(grid)
+library(gridExtra)
+
+## define read function for plantower data:
+read.plantower <- function(fpath) {
+  body <- read.csv(fpath, skip = 3)
+  header <- read.csv(fpath, skip = 1)
+  names(body) <- colnames(header)
+  names(body)[names(body) == "TIMESTAMP"] <- "date"
+  dataset <- body[, names(body) != "RECORD"]
+  dataset$date <- as.POSIXct(dataset$date, format = "%Y-%m-%d %H:%M:%S")
+  
+  dataset <- dataset %>% group_by(date = cut(date, breaks = "1 min")) %>%
+    summarize_all(funs(mean))
+  
+  return(dataset)
+}
+
+
+## define read function for DustTrak data:
+read.dtrak <- function(fpath){
+  sdate<-read.csv(fpath, header=FALSE, nrow=1, skip=7)
+  stime <-read.csv(fpath, header = FALSE, nrow=1, skip=6)  
+  startDate<-strptime(paste(sdate$V2, stime$V2), "%m/%d/%Y %H:%M:%S")
+  x<-read.csv(fpath, skip=37, stringsAsFactors = FALSE, header = FALSE)
+  names(x)<-c("elapsedtime","PM_1","PM_2_5","PM_4","PM_10","PM_TOTAL","alarms","errors")
+  x$date<-x$elapsedtime+startDate
+  x$date <- as.POSIXct(x$date, format = "%m/%d/%Y %H:%M:%S")
+  x<-x[,-c(1,7,8)]
+  x<-x[,c(6,1,2,3,4,5)]
+  x$PM_1 <- x$PM_1 * 1000
+  x$PM_2_5 <- x$PM_2_5 * 1000
+  x$PM_4 <- x$PM_4 * 1000
+  x$PM_10 <- x$PM_10 * 1000
+  x$PM_TOTAL <- x$PM_TOTAL * 1000
+  
+  x <- x %>% 
+    group_by(date = cut(date, breaks = "1 min")) %>%
+    summarize_all(funs(mean))
+  
+  return(x)
+}
+
+
+
+
+## define path to raw plantower data (read-only):  
+plantower.path <- "./data/plantower/"
+plantower_files <- list.files(path = plantower.path, pattern = "\\.dat$",
+                              all.files=FALSE, full.names = TRUE,
+                              ignore.case = FALSE)
+
+## define path to raw DustTraK data (read-only):
+dtrak.path <- "./data/dusttrak/"
+dtrak_files <- list.files(path = dtrak.path, pattern = "\\.csv$",
+                          all.files=FALSE, full.names = TRUE,
+                          ignore.case = FALSE)
+
+## apply read function to list of DustTrak files:
+dtrak <- ldply(dtrak_files, read.dtrak)
+class(dtrak$date)
+
+## convert to tidy format:
+dtrak_long <- dtrak %>%
+  gather(pollutant, value, -date) %>%
+  filter(value > 0)
+
+## create an id vector (in lieu of PMS3003, PMS5003, etc.):
+dtrak_long$pms <- "DustTrak"
+
+
+## apply read function to list of platnower files:
+plantower <- ldply(plantower_files, read.plantower)
+
+## inspect the processed data:
+colnames(plantower)
+class(plantower$date)
+str(plantower)
+
+## convert to tidy format:
+plantower_long <- plantower %>%
+  gather(key, value, -date) %>%
+  filter(value > 0)
+
+## extract variables from previous column names and store into new array:
+split <- str_split(plantower_long$key, pattern = c("PMS"), simplify = TRUE)
+
+## use vectors from split array to define new variables:
+plantower_long$pollutant <- str_replace(split[, 1], "_$", "")
+plantower_long$pms <- split[, 2]
+
+## create a master dataframe in wide format for linear regressions using ggplot:
+df <- full_join(plantower, dtrak, by = "date")
+df$date <- as.POSIXct(df$date)
+## create a master dataframe in tidy format for producing time-series plots with ggplot:
+df_long <- bind_rows(plantower_long, dtrak_long) ## match column names from Dtrak with Plantower, e.g. PM_1 versus pm1!
+
+
+## extract mass density and number density from master and assign to individual dataframes:
+mass <- filter(df_long, pollutant == "PM_1" | pollutant == "PM_10" | pollutant == "PM_2_5")
+number <- filter(df_long, pollutant == "PNC_0_3" | pollutant == "PNC_0_5" | pollutant == "PNC_1_0" | pollutant == "PNC_2_5" | pollutant == "PNC_5_0" | pollutant == "PNC_10_0")
+
+mass$date <- as.POSIXct(mass$date)
+number$date <- as.POSIXct(number$date)
+
+## time-series of the mass density data:
+## filter out the single outlier ~ 30,000 ugm-3!
+
+## convert pms into a factor with specific levels:
+mass$pms <- factor(mass$pms,
+                   levels = c("3003_S_Avg",
+                              "3003_A_Avg",
+                              "5003_S_Avg",
+                              "5003_A_Avg",
+                              "7003_S_Avg",
+                              "7003_A_Avg",
+                              "A003_S_Avg",
+                              "A003_A_Avg",
+                              "DustTrak")
+                   )
+
+number$pms <- factor(number$pms, 
+                     levels = c("5003_Avg", "7003_Avg", "A003_Avg"))
+
+## create a custom colormap for these prescribed levels:
+hue_pal()(8)
+mass_cols <- c("3003_S_Avg" = "#F8766D",
+          "3003_A_Avg" = "#CD9600",
+          "5003_S_Avg" = "#7CAE00",
+          "5003_A_Avg" = "#00BE67",
+          "7003_S_Avg" = "#00BFC4",
+          "7003_A_Avg" = "#00A9FF",
+          "A003_S_Avg" = "#C77CFF",
+          "A003_A_Avg" = "#FF61CC",
+          "DustTrak" = "red"
+)
+
+## create test start/end objects:
+test_1_start <- "2017-12-21 15:07:00"
+test_1_end <- "2017-12-21 16:07:00"
+test_2_start <- "2017-12-21 17:37:00"
+test_2_end <- "2017-12-21 18:37:00"
+match_1 <- "2017-12-21 14:30:00"
+match_2 <- "2017-12-21 17:15:00"
+
+## create axis-limits object for lm() figures:
+pm_1_x <- 100
+pm_1_y <- 100
+pm_2_5_x <- 100
+pm_2_5_y <- 100
+pm_10_x <- 100
+pm_10_y <- 100
+
+
+mass_time_series <- ggplot(mass, aes(x=date, y=value, color = pms)) + 
+  geom_point() + 
+  facet_wrap(~pollutant, scales = "free_y") + 
+  scale_x_datetime(date_breaks = "30 min", date_labels = "%m-%d %H:%M") +
+  ylab(expression(~mu*g*m^-3)) +
+  xlab("Time") +
+  ## time interval for first regression:
+  geom_vline(xintercept=as.POSIXct(test_1_start)) + 
+  geom_vline(xintercept=as.POSIXct(test_1_end)) +
+  ## time interaval for second regression:
+  geom_vline(xintercept=as.POSIXct(test_2_start)) + 
+  geom_vline(xintercept=as.POSIXct(test_2_end)) +
+  annotate("text", label = "Lit Match", color = "firebrick",
+           x = as.POSIXct(match_1), y = 1700) +
+  annotate("text", label = "Lit Match", color = "firebrick",
+           x = as.POSIXct(match_2), y = 1000) +
+  theme_bw() + 
+  guides(color=guide_legend(title="Measurement")) + 
+  scale_color_manual(values = mass_cols) + 
+  theme(legend.position = "top", plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"),
+        axis.text.y = element_text(size=rel(1.0), face = "bold", colour = "black"),
+        axis.text.x = element_text(size=rel(1.0), face = "plain", colour = "black", angle = 45, hjust = 1),
+        axis.title = element_text(size=15, face = "bold"))
+
+mass_time_series
+
+## We can save our plot in a high-res png using ggsave():
+
+mass_time_series_zoom <- ggplot(filter(mass, value <= 500), aes(x=date, y=value, color = pms)) + 
+  geom_point() + 
+  facet_wrap(~pollutant, scales = "free_y") + 
+  scale_x_datetime(date_breaks = "30 min", date_labels = "%m-%d %H:%M") +
+  ylab(expression(~mu*g*m^-3)) +
+  xlab("Time") +
+  ## time interval for first regression:
+  geom_vline(xintercept=as.POSIXct(test_1_start)) + 
+  geom_vline(xintercept=as.POSIXct(test_1_end)) +
+  ## time interaval for second regression:
+  geom_vline(xintercept=as.POSIXct(test_2_start)) + 
+  geom_vline(xintercept=as.POSIXct(test_2_end)) +
+  annotate("text", label = "Lit Match", color = "firebrick",
+           x = as.POSIXct(match_1), y = 525) +
+  annotate("text", label = "Lit Match", color = "firebrick",
+           x = as.POSIXct(match_2), y = 525) +
+  theme_bw() + 
+  guides(color=guide_legend(title="Measurement")) + 
+  scale_color_manual(values = mass_cols) + 
+  theme(legend.position = "top", plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"),
+        axis.text.y = element_text(size=rel(1.0), face = "bold", colour = "black"),
+        axis.text.x = element_text(size=rel(1.0), face = "plain", colour = "black", angle = 45, hjust = 1),
+        axis.title = element_text(size=15, face = "bold"))
+
+mass_time_series_zoom
+
+
+## time-series of the number density data:
+number_time_series <- ggplot(filter(number), aes(x=date, y=value, col = pms)) + 
+  geom_point() + 
+  facet_wrap(~pollutant, scales = "free_y") + 
+  ylab(expression(~particles/cm^3)) +
+  xlab("Time") +
+  geom_vline(xintercept=as.POSIXct(match_1), color = "firebrick") + 
+  geom_vline(xintercept=as.POSIXct(match_2), color = "firebrick") +
+  guides(color=guide_legend(title="Measurement")) + 
+  theme_bw() + 
+  theme(legend.position = "top", plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"),
+        axis.text.y = element_text(size=rel(1.0), face = "bold", colour = "black"),
+        axis.text.x = element_text(size=rel(1.0), face = "plain", colour = "black", angle = 45, hjust = 1),
+        axis.title = element_text(size=15, face = "bold"))
+
+number_time_series
+
+## linear regressions: ##############
+
+## PM_1 ################################################
+
+## PMS3003:
+pm_1_pms3003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_1_x)) +
+    scale_y_continuous(limits = c(0, pm_1_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[1.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[1.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS3003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_1_pms3003_A <- pm_1_pms3003_A_regression(lm(PM_1_PMS3003_A_Avg~PM_1, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_1_pms3003_A
+
+
+## missing PMS3003_S data for this round (issue with CR_Basic DAQ script that has been fixed)
+
+
+## PMS5003:
+pm_1_pms5003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_1_x)) +
+    scale_y_continuous(limits = c(0, pm_1_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[1.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[1.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS5003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_1_pms5003_A <- pm_1_pms5003_A_regression(lm(PM_1_PMS5003_A_Avg~PM_1, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_1_pms5003_A
+
+pm_1_pms5003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_1_x)) +
+    scale_y_continuous(limits = c(0, pm_1_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[1.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[1.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS5003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+pm_1_pms5003_S <- pm_1_pms5003_S_regression(lm(PM_1_PMS5003_S_Avg~PM_1, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_1_pms5003_S
+
+
+## PMS7003:
+pm_1_pms7003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_1_x)) +
+    scale_y_continuous(limits = c(0, pm_1_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[1.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[1.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS7003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_1_pms7003_A <- pm_1_pms7003_A_regression(lm(PM_1_PMS7003_A_Avg~PM_1, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_1_pms7003_A
+
+
+pm_1_pms7003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_1_x)) +
+    scale_y_continuous(limits = c(0, pm_1_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[1.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[1.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS7003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_1_pms7003_S <- pm_1_pms7003_S_regression(lm(PM_1_PMS7003_S_Avg~PM_1, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_1_pms7003_S
+
+
+## PMSA003:
+pm_1_pmsA003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_1_x)) +
+    scale_y_continuous(limits = c(0, pm_1_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[1.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[1.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMSA003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_1_pmsA003_A <- pm_1_pmsA003_A_regression(lm(PM_1_PMSA003_A_Avg~PM_1, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_1_pmsA003_A
+
+
+pm_1_pmsA003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_1_x)) +
+    scale_y_continuous(limits = c(0, pm_1_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[1.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[1.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMSA003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_1_pmsA003_S <- pm_1_pmsA003_S_regression(lm(PM_1_PMSA003_S_Avg~PM_1, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_1_pmsA003_S
+
+
+
+## PM_2_5 ###################################################################################
+
+## PMS3003:
+pm_2_5_pms3003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS3003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pms3003_A <- pm_2_5_pms3003_A_regression(lm(PM_2_5_PMS3003_A_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_2_5_pms3003_A
+
+
+pm_2_5_pms3003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS3003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pms3003_S <- pm_2_5_pms3003_S_regression(lm(PM_2_5_PMS3003_S_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_2_5_pms3003_S
+
+## PMS5003:
+pm_2_5_pms5003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS5003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pms5003_A <- pm_2_5_pms5003_A_regression(lm(PM_2_5_PMS5003_A_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_2_5_pms5003_A
+
+pm_2_5_pms5003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS5003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pms5003_S <- pm_2_5_pms5003_S_regression(lm(PM_2_5_PMS5003_S_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_2_5_pms5003_S
+
+
+## PMS7003:
+pm_2_5_pms7003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS7003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pms7003_A <- pm_2_5_pms7003_A_regression(lm(PM_2_5_PMS7003_A_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_2_5_pms7003_A
+
+
+pm_2_5_pms7003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS7003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pms7003_S <- pm_2_5_pms7003_S_regression(lm(PM_2_5_PMS7003_S_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_2_5_pms7003_S
+
+## PMSA003:
+pm_2_5_pmsA003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMSA003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pmsA003_A <- pm_2_5_pmsA003_A_regression(lm(PM_2_5_PMSA003_A_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_2_5_pmsA003_A
+
+pm_2_5_pmsA003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_2_5_x)) +
+    scale_y_continuous(limits = c(0, pm_2_5_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[2.5]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[2.5]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMSA003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_2_5_pmsA003_S <- pm_2_5_pmsA003_S_regression(lm(PM_2_5_PMSA003_S_Avg~PM_2_5, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_2_5_pmsA003_S
+
+## PM_10 ####################################
+
+## PMS3003:
+pm_10_pms3003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS3003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pms3003_A <- pm_10_pms3003_A_regression(lm(PM_10_PMS3003_A_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_10_pms3003_A
+
+## We can save our plot in a high-res png using ggsave():
+
+pm_10_pms3003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) + 
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS3003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pms3003_S <- pm_10_pms3003_S_regression(lm(PM_10_PMS3003_S_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_10_pms3003_S
+
+
+## PMS5003:
+pm_10_pms5003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS5003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pms5003_A <- pm_10_pms5003_A_regression(lm(PM_10_PMS5003_A_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_10_pms5003_A
+
+
+pm_10_pms5003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS5003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pms5003_S <- pm_10_pms5003_S_regression(lm(PM_10_PMS5003_S_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_10_pms5003_S
+
+
+## PMS7003:
+pm_10_pms7003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS7003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pms7003_A <- pm_10_pms7003_A_regression(lm(PM_10_PMS7003_A_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_10_pms7003_A
+
+
+pm_10_pms7003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMS7003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pms7003_S <- pm_10_pms7003_S_regression(lm(PM_10_PMS7003_S_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_1_start &  as.POSIXct(date) <= test_1_end)))
+pm_10_pms7003_S
+
+
+## PMSA003:
+pm_10_pmsA003_A_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMSA003 (A) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pmsA003_A <- pm_10_pmsA003_A_regression(lm(PM_10_PMSA003_A_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_10_pmsA003_A
+
+
+pm_10_pmsA003_S_regression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    geom_smooth(method = "lm", col = "red", level = 0.95) + ## "lm" or "loess" fit!
+    geom_abline(intercept = 0, slope = 1, linetype = 2, color = "firebrick") +
+    scale_x_continuous(limits = c(0, pm_10_x)) +
+    scale_y_continuous(limits = c(0, pm_10_y)) +
+    theme_bw() + 
+    xlab(expression(~DustTrak~PM[10.0]~mu*g*m^-3)) + 
+    ylab(expression(~Plantower~PM[10.0]~mu*g*m^-3)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size=12, face = "bold"), legend.position = "none",
+          axis.text = element_text(size=rel(1.0), face = "bold", colour = "black"),
+          axis.title = element_text(size=15, face = "bold")) +  
+    labs(title = paste0("PMSA003 (S) & DustTrak"),
+         subtitle = paste("Adj R2 = ", signif(summary(fit)$adj.r.squared, 4),
+                          "Intercept =",signif(fit$coef[[1]], 2), 
+                          " Slope =",signif(fit$coef[[2]], 2), 
+                          " P =",signif(summary(fit)$coef[2,4], 3)))
+}
+
+## filter by time:
+pm_10_pmsA003_S <- pm_10_pmsA003_S_regression(lm(PM_10_PMSA003_S_Avg~PM_10, data = filter(df, as.POSIXct(date) >= test_2_start &  as.POSIXct(date) <= test_2_end)))
+pm_10_pmsA003_S
+
+
+###### gridExtra#######
+
+## pick up here again - 2017-12-29 19:45:00
+
+
+blank <- grid.rect(gp=gpar(col="white"))
+
+####### grid pm1 a #####
+## grid.arrange(pm_1_pms3003_A, pm_1_pms5003_A, pm_1_pms7003_A, pm_1_pmsA003_A)
+grid_pm1_a <- arrangeGrob(pm_1_pms3003_A, pm_1_pms5003_A, pm_1_pms7003_A, pm_1_pmsA003_A)
+grid_pm1_a
+
+## We can save our plot in a high-res png using ggsave():
+ggsave(filename = paste0("./figures/", format(Sys.time(), "%Y-%m-%d"), "_GRID_PM1_A.png"),
+       plot = grid_pm1_a,
+       scale = 1,
+       width = 16,
+       height = 10,
+       units = "in",
+       dpi = 900)
+
+
+###### grid pm1 s #####
+grid.arrange(blank, pm_1_pms5003_S, pm_1_pms7003_S, pm_1_pmsA003_S)
+grid_pm1_s <- arrangeGrob(blank, pm_1_pms5003_S, pm_1_pms7003_S, pm_1_pmsA003_S)
+grid_pm1_s
+
+## We can save our plot in a high-res png using ggsave():
+ggsave(filename = paste0("./figures/", format(Sys.time(), "%Y-%m-%d"), "_GRID_PM1_S.png"),
+       plot = grid_pm1_s,
+       scale = 1,
+       width = 16,
+       height = 10,
+       units = "in",
+       dpi = 900)
+
+
+
+####### grid pm2_5 a #####
+grid.arrange(pm_2_5_pms3003_A, pm_2_5_pms5003_A, pm_2_5_pms7003_A, pm_2_5_pmsA003_A)
+grid_pm2_5_a <- arrangeGrob(pm_2_5_pms3003_A, pm_2_5_pms5003_A, pm_2_5_pms7003_A, pm_2_5_pmsA003_A)
+grid_pm2_5_a
+
+## We can save our plot in a high-res png using ggsave():
+ggsave(filename = paste0("./figures/", format(Sys.time(), "%Y-%m-%d"), "_GRID_PM2_5_A.png"),
+       plot = grid_pm2_5_a,
+       scale = 1,
+       width = 16,
+       height = 10,
+       units = "in",
+       dpi = 900)
+
+
+###### grid pm2_5 s #####
+grid.arrange(pm_2_5_pms3003_S, pm_2_5_pms5003_S, pm_2_5_pms7003_S, pm_2_5_pmsA003_S)
+grid_pm2_5_s <- arrangeGrob(pm_2_5_pms3003_S, pm_2_5_pms5003_S, pm_2_5_pms7003_S, pm_2_5_pmsA003_S)
+grid_pm2_5_s
+
+## We can save our plot in a high-res png using ggsave():
+ggsave(filename = paste0("./figures/", format(Sys.time(), "%Y-%m-%d"), "_GRID_PM2_5_S.png"),
+       plot = grid_pm2_5_s,
+       scale = 1,
+       width = 16,
+       height = 10,
+       units = "in",
+       dpi = 900)
+
+
+####### grid pm10 a #####
+grid.arrange(pm_10_pms3003_A, pm_10_pms5003_A, pm_10_pms7003_A, pm_10_pmsA003_A)
+grid_pm10_a <- arrangeGrob(pm_10_pms3003_A, pm_10_pms5003_A, pm_10_pms7003_A, pm_10_pmsA003_A)
+grid_pm10_a
+
+## We can save our plot in a high-res png using ggsave():
+ggsave(filename = paste0("./figures/", format(Sys.time(), "%Y-%m-%d"), "_GRID_PM10_A.png"),
+       plot = grid_pm10_a,
+       scale = 1,
+       width = 16,
+       height = 10,
+       units = "in",
+       dpi = 900)
+
+
+###### grid pm10 s #####
+grid.arrange(pm_10_pms3003_S, pm_10_pms5003_S, pm_10_pms7003_S, pm_10_pmsA003_S)
+grid_pm10_s <- arrangeGrob(pm_10_pms3003_S, pm_10_pms5003_S, pm_10_pms7003_S, pm_10_pmsA003_S)
+grid_pm10_s
+
+## We can save our plot in a high-res png using ggsave():
+ggsave(filename = paste0("./figures/", format(Sys.time(), "%Y-%m-%d"), "_GRID_PM10_S.png"),
+       plot = grid_pm10_s,
+       scale = 1,
+       width = 16,
+       height = 10,
+       units = "in",
+       dpi = 900)
